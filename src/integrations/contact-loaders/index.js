@@ -33,11 +33,11 @@ async function getSetCacheableResult(cacheKey, fallbackFunc) {
     }
   }
   const slowRes = await fallbackFunc();
-  if (r.redis && slowRes && slowRes.expireSeconds) {
+  if (r.redis && slowRes && slowRes.expiresSeconds) {
     await r.redis.setAsync(
       cacheKey,
       JSON.stringify(slowRes),
-      slowRes.expireSeconds
+      slowRes.expiresSeconds
     );
   }
   return slowRes;
