@@ -110,14 +110,16 @@ export const getCacheContactAssignment = async (id, campaignId, contactObj) => {
       id
     );
     // console.log('getContactAssignmentCache1', contactAssignment)
-    // eslint-disable-next-line camelcase
-    const [assignment_id, user_id] = (contactAssignment || ":").split(":");
-    // console.log('getContactAssignmentCache2', contactAssignment, assignment_id, user_id);
-    // if empty string, then it's null
-    return {
-      assignment_id: assignment_id ? Number(assignment_id) : null,
-      user_id: user_id ? Number(user_id) : null
-    };
+    if (contactAssignment) {
+      // eslint-disable-next-line camelcase
+      const [assignment_id, user_id] = (contactAssignment || ":").split(":");
+      // console.log('getContactAssignmentCache2', contactAssignment, assignment_id, user_id);
+      // if empty string, then it's null
+      return {
+        assignment_id: assignment_id ? Number(assignment_id) : null,
+        user_id: user_id ? Number(user_id) : null
+      };
+    }
   } else {
     // if no cache, load it from the db
     const assignment = await r
@@ -356,16 +358,10 @@ const campaignContactCache = {
       // console.log('lookupByCell cache', cell, service, messageServiceSid, cellData)
       if (cellData) {
         // eslint-disable-next-line camelcase
-        const [
-          campaign_contact_id,
-          assignment_id,
-          timezone_offset
-        ] = cellData.split(":");
+        const [campaign_contact_id, _, timezone_offset] = cellData.split(":");
         return {
-          campaign_contact_id,
-          assignment_id,
-          timezone_offset,
-          message_status: await getMessageStatus(campaign_contact_id)
+          campaign_contact_id: Number(campaign_contact_id),
+          timezone_offset
         };
       }
       if (bailWithoutCache) {
@@ -386,6 +382,7 @@ const campaignContactCache = {
     // console.log('lookupByCell db', cell, 'x', service, 'y', messageServiceSid, 'z', lastMessage)
     if (lastMessage) {
       return {
+        id: lastMessage.campaign_contact_id,
         campaign_contact_id: lastMessage.campaign_contact_id,
         service_id: lastMessage.service_id,
         message_id: lastMessage.id
@@ -465,23 +462,24 @@ const campaignContactCache = {
         // Other contexts don't really need to update the cell key -- just the status
         const cellKey = cellTargetKey(contact.cell, contact.messageservice_sid);
         // console.log('contact updateStatus', cellKey, newStatus, contact)
-        await r.redis
+        let redisQuery = r.redis
           .multi()
-          .set(statusKey, newStatus)
           // We update the cell info on status updates, because this happens
           // during message sending -- this is exactly the moment we want to
           // 'steal' a cell from one (presumably older) campaign into another
+          // delay expiration for contacts we continue to update
           .set(
             cellKey,
-            [contact.id, contact.assignment_id, contact.timezone_offset].join(
-              ":"
-            )
+            [contact.id, "", contact.timezone_offset || ""].join(":")
           )
           // delay expiration for contacts we continue to update
           .expire(contactKey, 43200)
           .expire(statusKey, 43200)
-          .expire(cellKey, 43200)
-          .execAsync();
+          .expire(cellKey, 43200);
+        if (newStatus) {
+          redisQuery = redisQuery.set(statusKey, newStatus);
+        }
+        await redisQuery.execAsync();
         //await updateAssignmentContact(contact, newStatus);
       }
       clearMemoizedCache(contact.id);
@@ -494,7 +492,6 @@ const campaignContactCache = {
         err
       );
     }
-
     // console.log('updateStatus, CONTACT', contact)
   }
 };
