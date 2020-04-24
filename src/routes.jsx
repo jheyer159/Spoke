@@ -56,7 +56,7 @@ export default function makeRoutes(requireAuth = () => {}) {
           components={{
             main: () => <DashboardLoader path="/app" />,
             topNav: p => (
-              <TopNav title="Spoke Texting" orgId={p.params.organizationId} />
+              <TopNav title="Text The Vote" orgId={p.params.organizationId} />
             )
           }}
         />
@@ -91,7 +91,7 @@ export default function makeRoutes(requireAuth = () => {}) {
                 main: TexterTodoList,
                 topNav: p => (
                   <TopNav
-                    title="Spoke Texting"
+                    title="Text The Vote"
                     orgId={p.params.organizationId}
                   />
                 )

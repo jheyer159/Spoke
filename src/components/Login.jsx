@@ -134,7 +134,7 @@ class Login extends React.Component {
               </section>
             )}
             <div className={css(styles.fieldContainer)}>
-              <h2 className={css(styles.header)}>Welcome to Spoke</h2>
+              <h2 className={css(styles.header)}>Welcome to Text The Vote</h2>
               <UserEdit
                 authType={this.state.active}
                 saveLabel={saveLabels[this.state.active]}

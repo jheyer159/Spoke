@@ -798,7 +798,7 @@ export async function exportCampaign(job) {
       await sendEmail({
         to: user.email,
         subject: `Export ready for ${campaign.title}`,
-        text: `Your Spoke exports are ready! These URLs will be valid for 24 hours.
+        text: `Your exports are ready! These URLs will be valid for 24 hours.
         Campaign export: ${campaignExportUrl}
         Message export: ${campaignMessagesExportUrl}`
       }).catch(err => {
@@ -812,7 +812,7 @@ export async function exportCampaign(job) {
       await sendEmail({
         to: user.email,
         subject: `Export failed for ${campaign.title}`,
-        text: `Your Spoke exports failed... please try again later.
+        text: `Your exports failed... please try again later.
         Error: ${err.message}`
       });
     }
