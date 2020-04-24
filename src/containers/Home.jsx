@@ -97,7 +97,7 @@ class Home extends React.Component {
     return (
       <div>
         <div className={css(styles.header)}>
-          Spoke is a new way to run campaigns using text messaging.
+          Text The Vote is a way to run campaigns using text messaging.
         </div>
         <div>
           <a
@@ -117,10 +117,7 @@ class Home extends React.Component {
     return (
       <div className={css(styles.container)}>
         <div className={css(styles.logoDiv)}>
-          <img
-            src="https://s3-us-west-1.amazonaws.com/spoke-public/spoke_logo.svg"
-            className={css(styles.logoImg)}
-          />
+          <h1>Text The Vote</h1>
         </div>
         <div className={css(styles.content)}>{this.renderContent()}</div>
       </div>

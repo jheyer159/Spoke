@@ -73,7 +73,9 @@ const text = {
     color: colors.darkGray,
     fontSize: "1.5em",
     fontWeight: 600,
-    fontFamily: defaultFont
+    fontFamily: defaultFont,
+    marginLeft: "0.5em",
+    marginRight: "0.5em"
   },
   secondaryHeader: {
     color: colors.darkGray,
@@ -119,7 +121,8 @@ const components = {
   },
   logoDiv: {
     margin: "50 auto",
-    overflow: "hidden"
+    overflow: "hidden",
+    color: "black"
   },
   logoImg: {}
 };
