@@ -230,7 +230,7 @@ async function sendMessage(message, contact, trx, organization) {
       parseMessageText(message)
     );
 
-    console.log("twilioMessage", messageParams);
+    // console.log("twilioMessage", messageParams);
     if (APIERRORTEST) {
       postMessageSend(
         message,
@@ -281,7 +281,7 @@ export function postMessageSend(
         ...changes
       }
     : {};
-  log.info("postMessageSend", message, changes, response, err);
+  log.debug("postMessageSend", message, changes, response, err);
   let hasError = false;
   if (err) {
     hasError = true;
