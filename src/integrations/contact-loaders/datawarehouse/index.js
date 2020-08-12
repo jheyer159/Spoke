@@ -47,7 +47,7 @@ export async function available(organization, user) {
   /// to e.g. verify credentials or test server availability,
   /// then it's better to allow the result to be cached
   const result = user.is_superadmin && hasConfig("WAREHOUSE_DB_HOST");
-  // FUTURE: maybe test connection and then have expireSeconds caching
+  // FUTURE: maybe test connection and then have expiresSeconds caching
   return {
     result,
     expiresSeconds: 0
@@ -67,12 +67,7 @@ export function clientChoiceDataCacheKey(organization, campaign, user) {
   return ""; // independent of org, campaign, and user since it's about availability
 }
 
-export async function getClientChoiceData(
-  organization,
-  campaign,
-  user,
-  loaders
-) {
+export async function getClientChoiceData(organization, campaign, user) {
   /// data to be sent to the admin client to present options to the component or similar
   /// The react-component will be sent this data as a property
   /// return a json object which will be cached for expiresSeconds long
@@ -101,7 +96,7 @@ export async function getClientChoiceData(
   };
 }
 
-export async function processContactLoad(job, maxContacts) {
+export async function processContactLoad(job, maxContacts, organization) {
   /// trigger processing -- this will likely be the most important part
   /// you should load contacts into the contact table with the job.campaign_id
   /// Since this might just *begin* the processing and other work might
@@ -109,6 +104,11 @@ export async function processContactLoad(job, maxContacts) {
   /// AFTER true contact-load completion, this (or another function) MUST call
   /// src/workers/jobs.js::completeContactLoad(job)
   ///   The async function completeContactLoad(job) will delete opt-outs, delete duplicate cells, clear/update caching, etc.
+  /// The organization parameter is an object containing the name and other
+  ///   details about the organization on whose behalf this contact load
+  ///   was initiated. It is included here so it can be passed as the
+  ///   second parameter of getConfig in order to retrieve organization-
+  ///   specific configuration values.
   /// Basic responsibilities:
   /// 1. delete previous campaign contacts on a previous choice/upload
   /// 2. set campaign_contact.campaign_id = job.campaign_id on all uploaded contacts
@@ -136,7 +136,7 @@ export async function processContactLoad(job, maxContacts) {
     });
 }
 
-export async function loadContactsFromDataWarehouseFragment(jobEvent) {
+export async function loadContactsFromDataWarehouseFragment(job, jobEvent) {
   console.log(
     "starting loadContactsFromDataWarehouseFragment",
     jobEvent.campaignId,
@@ -179,7 +179,7 @@ export async function loadContactsFromDataWarehouseFragment(jobEvent) {
     knexResult = await warehouseConnection.raw(sqlQuery);
   } catch (err) {
     // query failed
-    log.error("Data warehouse query failed: ", err);
+    console.error("Data warehouse query failed: ", err);
     jobMessages.push(`Data warehouse count query failed with ${err}`);
     // TODO: send feedback about job
   }
@@ -199,7 +199,7 @@ export async function loadContactsFromDataWarehouseFragment(jobEvent) {
     }
   });
   if (!("first_name" in fields && "last_name" in fields && "cell" in fields)) {
-    log.error(
+    console.error(
       "SQL statement does not return first_name, last_name, and cell: ",
       sqlQuery,
       fields
@@ -285,7 +285,7 @@ export async function loadContactsFromDataWarehouseFragment(jobEvent) {
           validationStats.invalidCellCount = result;
         });
     }
-    completeContactLoad(job, jobMessages);
+    completeContactLoad(job);
     return { completed: 1, validationStats };
   } else if (jobEvent.part < jobEvent.totalParts - 1) {
     const newPart = jobEvent.part + 1;
@@ -304,7 +304,7 @@ export async function loadContactsFromDataWarehouseFragment(jobEvent) {
       await sendJobToAWSLambda(newJob);
       return { invokedAgain: 1 };
     } else {
-      return loadContactsFromDataWarehouseFragment(newJob);
+      return loadContactsFromDataWarehouseFragment(job, newJob);
     }
   }
 }
@@ -315,14 +315,14 @@ export async function loadContactsFromDataWarehouse(job) {
   const sqlQuery = JSON.parse(job.payload).contactSql;
 
   if (!sqlQuery.startsWith("SELECT") || sqlQuery.indexOf(";") >= 0) {
-    log.error(
+    console.error(
       "Malformed SQL statement.  Must begin with SELECT and not have any semicolons: ",
       sqlQuery
     );
     return;
   }
   if (!datawarehouse) {
-    log.error("No data warehouse connection, so cannot load contacts", job);
+    console.error("No data warehouse connection, so cannot load contacts", job);
     return;
   }
 
@@ -334,7 +334,7 @@ export async function loadContactsFromDataWarehouse(job) {
       `SELECT COUNT(*) FROM ( ${sqlQuery} ) AS QUERYCOUNT`
     );
   } catch (err) {
-    log.error("Data warehouse count query failed: ", err);
+    console.error("Data warehouse count query failed: ", err);
     jobMessages.push(`Data warehouse count query failed with ${err}`);
   }
 
@@ -375,7 +375,7 @@ export async function loadContactsFromDataWarehouse(job) {
     .where("campaign_id", job.campaign_id)
     .delete();
 
-  await loadContactsFromDataWarehouseFragment({
+  await loadContactsFromDataWarehouseFragment(job, {
     jobId: job.id,
     query: sqlQuery,
     campaignId: job.campaign_id,

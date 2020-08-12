@@ -13,6 +13,8 @@ export function addWhereClauseForContactsFilterMessageStatusIrrespectiveOfPastDu
   let query = queryParameter;
   if (messageStatusFilter === "needsMessageOrResponse") {
     query.whereIn("message_status", ["needsResponse", "needsMessage"]);
+  } else if (messageStatusFilter === "allReplies") {
+    query.whereNotIn("message_status", ["messaged", "needsMessage"]);
   } else {
     query = query.whereIn("message_status", messageStatusFilter.split(","));
   }
@@ -67,35 +69,39 @@ export function getContacts(
   });
 
   if (contactsFilter) {
-    const validTimezone = contactsFilter.validTimezone;
-    if (validTimezone !== null) {
-      if (validTimezone === true) {
-        if (defaultTimezoneIsBetweenTextingHours(config)) {
-          // missing timezone ok
-          validOffsets.push("");
+    if (contactsFilter.contactId) {
+      query = query.where({ id: contactsFilter.contactId });
+    } else {
+      const validTimezone = contactsFilter.validTimezone;
+      if (validTimezone !== null) {
+        if (validTimezone === true) {
+          if (defaultTimezoneIsBetweenTextingHours(config)) {
+            // missing timezone ok
+            validOffsets.push("");
+          }
+          query = query.whereIn("timezone_offset", validOffsets);
+        } else if (validTimezone === false) {
+          if (!defaultTimezoneIsBetweenTextingHours(config)) {
+            // missing timezones are not ok to text
+            invalidOffsets.push("");
+          }
+          query = query.whereIn("timezone_offset", invalidOffsets);
         }
-        query = query.whereIn("timezone_offset", validOffsets);
-      } else if (validTimezone === false) {
-        if (!defaultTimezoneIsBetweenTextingHours(config)) {
-          // missing timezones are not ok to text
-          invalidOffsets.push("");
-        }
-        query = query.whereIn("timezone_offset", invalidOffsets);
       }
-    }
 
-    query = addWhereClauseForContactsFilterMessageStatusIrrespectiveOfPastDue(
-      query,
-      (contactsFilter && contactsFilter.messageStatus) ||
-        (pastDue
-          ? // by default if asking for 'send later' contacts we include only those that need replies
-            "needsResponse"
-          : // we do not want to return closed/messaged
-            "needsMessageOrResponse")
-    );
+      query = addWhereClauseForContactsFilterMessageStatusIrrespectiveOfPastDue(
+        query,
+        (contactsFilter && contactsFilter.messageStatus) ||
+          (pastDue
+            ? // by default if asking for 'send later' contacts we include only those that need replies
+              "needsResponse"
+            : // we do not want to return closed/messaged
+              "needsMessageOrResponse")
+      );
 
-    if (Object.prototype.hasOwnProperty.call(contactsFilter, "isOptedOut")) {
-      query = query.where("is_opted_out", contactsFilter.isOptedOut);
+      if (Object.prototype.hasOwnProperty.call(contactsFilter, "isOptedOut")) {
+        query = query.where("is_opted_out", contactsFilter.isOptedOut);
+      }
     }
   }
 
@@ -113,18 +119,36 @@ export function getContacts(
 export const resolvers = {
   Assignment: {
     ...mapFieldsToModel(["id", "maxContacts"], Assignment),
-    texter: async (assignment, _, { loaders }) =>
-      assignment.texter
-        ? assignment.texter
-        : await loaders.user.load(assignment.user_id),
+    texter: async (assignment, _, { loaders, user }) => {
+      if (assignment.texter) {
+        return assignment.texter;
+      } else if (assignment.user_id === user.id) {
+        // Will use current user's cache if present
+        return user;
+      } else if (assignment.first_name) {
+        return assignment;
+      } else {
+        return await loaders.user.load(assignment.user_id);
+      }
+    },
     campaign: async (assignment, _, { loaders }) =>
       loaders.campaign.load(assignment.campaign_id),
-    contactsCount: async (assignment, { contactsFilter }) => {
-      const campaign = await r.table("campaign").get(assignment.campaign_id);
-
-      const organization = await r
-        .table("organization")
-        .get(campaign.organization_id);
+    contactsCount: async (assignment, { contactsFilter }, { loaders }) => {
+      if (assignment.contacts_count) {
+        if (!contactsFilter || Object.keys(contactsFilter).length === 0) {
+          return assignment.contacts_count;
+        } else if (
+          assignment.needs_message_count &&
+          contactsFilter.messageStatus === "needsMessage" &&
+          Object.keys(contactsFilter).length === 1
+        ) {
+          return assignment.needs_message_count;
+        }
+      }
+      const campaign = await loaders.campaign.load(assignment.campaign_id);
+      const organization = await loaders.organization.load(
+        campaign.organization_id
+      );
 
       return await r.getCount(
         getContacts(assignment, contactsFilter, organization, campaign, true)

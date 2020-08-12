@@ -1,4 +1,5 @@
-import { r, loaders, CampaignContact } from "../../models";
+import { r, CampaignContact } from "../../models";
+import campaignCache from "./campaign";
 import optOutCache from "./opt-out";
 import organizationCache from "./organization";
 import { modelWithExtraProps } from "./lib";
@@ -83,21 +84,20 @@ export const setCacheContactAssignment = async (id, campaignId, contactObj) => {
     contactObj.assignment_id
   ) {
     const assignmentKey = contactAssignmentKey(campaignId);
-    // console.log('setCacheContactAssignment', id, contactObj.assignment_id, contactObj.user_id, assignmentKey)
+    const value = [
+      contactObj.assignment_id || "",
+      contactObj.user_id || ""
+    ].join(":");
     await r.redis
       .multi()
-      .hset(
-        assignmentKey,
-        id,
-        [contactObj.assignment_id || "", contactObj.user_id || ""].join(":")
-      )
+      .hset(assignmentKey, id, value)
       .expire(assignmentKey, 43200)
       .execAsync();
+    return value;
   }
 };
 
 export const getCacheContactAssignment = async (id, campaignId, contactObj) => {
-  // console.log('getCacheContactAssignment0', id, contactObj.assignment_id);
   if (contactObj && contactObj.assignment_id) {
     return {
       assignment_id: contactObj.assignment_id,
@@ -109,31 +109,30 @@ export const getCacheContactAssignment = async (id, campaignId, contactObj) => {
       contactAssignmentKey(campaignId),
       id
     );
-    // console.log('getContactAssignmentCache1', contactAssignment)
-    // eslint-disable-next-line camelcase
-    const [assignment_id, user_id] = (contactAssignment || ":").split(":");
-    // console.log('getContactAssignmentCache2', contactAssignment, assignment_id, user_id);
-    // if empty string, then it's null
-    return {
-      assignment_id: assignment_id ? Number(assignment_id) : null,
-      user_id: user_id ? Number(user_id) : null
-    };
-  } else {
-    // if no cache, load it from the db
-    const assignment = await r
-      .knex("campaign_contact")
-      .leftJoin("assignment", "assignment.id", "campaign_contact.assignment_id")
-      .where("campaign_contact.id", id)
-      .select("assignment_id", "user_id")
-      .first();
-    if (assignment) {
-      await setCacheContactAssignment(id, campaignId, assignment);
-      const { assignment_id, user_id } = assignment;
+    if (contactAssignment) {
+      // eslint-disable-next-line camelcase
+      const [assignment_id, user_id] = (contactAssignment || ":").split(":");
+      // if empty string, then it's null
       return {
         assignment_id: assignment_id ? Number(assignment_id) : null,
         user_id: user_id ? Number(user_id) : null
       };
     }
+  }
+  // if no cache, load it from the db
+  const assignment = await r
+    .knex("campaign_contact")
+    .leftJoin("assignment", "assignment.id", "campaign_contact.assignment_id")
+    .where("campaign_contact.id", id)
+    .select("assignment_id", "user_id")
+    .first();
+  if (assignment) {
+    await setCacheContactAssignment(id, campaignId, assignment);
+    const { assignment_id, user_id } = assignment;
+    return {
+      assignment_id: assignment_id ? Number(assignment_id) : null,
+      user_id: user_id ? Number(user_id) : null
+    };
   }
   return {};
 };
@@ -152,7 +151,6 @@ const saveCacheRecord = async (
       messageServiceSid,
       campaign
     );
-    // console.log('contact saveCacheRecord', contactCacheObj)
     const contactKey = cacheKey(dbRecord.id);
     await r.redis
       .multi()
@@ -200,11 +198,6 @@ const getMessageStatus = async (id, contactObj) => {
   return contact && contact.message_status;
 };
 
-const clearMemoizedCache = id => {
-  loaders.campaignContact.clear(String(id));
-  loaders.campaignContact.clear(Number(id));
-};
-
 const campaignContactCache = {
   clear: async (id, campaignId) => {
     if (r.redis) {
@@ -213,7 +206,6 @@ const campaignContactCache = {
         await r.redis.hdelAsync(contactAssignmentKey(id), id);
       }
     }
-    clearMemoizedCache(id);
   },
   load: async (id, opts) => {
     if (r.redis && CONTACT_CACHE_ENABLED) {
@@ -230,17 +222,18 @@ const campaignContactCache = {
         cacheData.message_status = await getMessageStatus(id, cacheData);
         Object.assign(
           cacheData,
-          await getCacheContactAssignment(id, cacheData.campaign_id, cacheData)
+          await getCacheContactAssignment(id, cacheData.campaign_id, cacheData),
+          { cachedResult: true }
         );
 
-        // console.log('contact fromCache', cacheData.id, cacheData.message_status)
         return modelWithExtraProps(cacheData, CampaignContact, [
           "organization_id",
           "city",
           "state",
           "user_id",
           "messageservice_sid",
-          "dynamic_assignment"
+          "dynamic_assignment",
+          "cachedResult"
         ]);
       }
       // Note that we don't try to load/save the cache
@@ -255,7 +248,7 @@ const campaignContactCache = {
   loadMany: async (
     campaign,
     organization,
-    { queryFunc, remainingMilliseconds }
+    { queryFunc, remainingMilliseconds, onCampaignStart }
   ) => {
     // queryFunc(query) has query input of a knex query
     // queryFunc should return a query with added where clauses
@@ -268,7 +261,6 @@ const campaignContactCache = {
       return;
     }
     console.log("campaign-contact loadMany", campaign.id);
-    loaders.campaignContact.clearAll();
     // 1. load the data
     let query = r
       .knex("campaign_contact")
@@ -340,6 +332,9 @@ const campaignContactCache = {
     });
     console.log("contact loadMany finish stream", campaign.id);
   },
+  orgId: async contact =>
+    contact.organization_id ||
+    ((await campaignCache.load(contact.campaign_id)) || {}).organization_id,
   lookupByCell: async (cell, service, messageServiceSid, bailWithoutCache) => {
     // Used to lookup contact/campaign information by cell number for incoming messages
     // in order to map it to the existing campaign, since Twilio, etc "doesn't know"
@@ -358,21 +353,21 @@ const campaignContactCache = {
         // eslint-disable-next-line camelcase
         const [
           campaign_contact_id,
-          assignment_id,
-          timezone_offset
+          _,
+          timezone_offset,
+          ...rest
         ] = cellData.split(":");
         return {
-          campaign_contact_id,
-          assignment_id,
+          campaign_contact_id: Number(campaign_contact_id),
           timezone_offset,
-          message_status: await getMessageStatus(campaign_contact_id)
+          campaign_id: rest.length ? rest[0] : undefined
         };
       }
       if (bailWithoutCache) {
         return false;
       }
     }
-    const [lastMessage] = await r
+    let messageQuery = r
       .knex("message")
       .select("campaign_contact_id")
       .where({
@@ -381,16 +376,24 @@ const campaignContactCache = {
         messageservice_sid: messageServiceSid,
         service
       })
-      .orderBy("created_at", "desc")
+      .orderBy("message.created_at", "desc")
       .limit(1);
-    // console.log('lookupByCell db', cell, 'x', service, 'y', messageServiceSid, 'z', lastMessage)
+    if (r.redis) {
+      // we get the campaign_id so we can cache errorCount and needsResponseCount
+      messageQuery = messageQuery
+        .join(
+          "campaign_contact",
+          "campaign_contact.id",
+          "message.campaign_contact_id"
+        )
+        .select("campaign_contact_id", "campaign_id");
+    }
+    const [lastMessage] = await messageQuery;
     if (lastMessage) {
       return {
+        id: lastMessage.campaign_contact_id,
         campaign_contact_id: lastMessage.campaign_contact_id,
-        service_id: lastMessage.service_id,
-        message_id: lastMessage.id
-        // NOTE: no timezone_offset here
-        // That's ok, because we only need it in the caching case to update assignment info
+        campaign_id: lastMessage.campaign_id
       };
     }
     return false;
@@ -406,47 +409,31 @@ const campaignContactCache = {
       assignment_id: newAssignmentId,
       user_id: newUserId
     });
-    clearMemoizedCache(contactId);
   },
   updateCampaignAssignmentCache: async (campaignId, contactIds) => {
+    if (r.redis && !contactIds) {
+      await campaignCache.updateAssignedCount(campaignId);
+    }
     if (r.redis && CONTACT_CACHE_ENABLED) {
-      const assignmentKey = contactAssignmentKey(campaignId);
+      // console.log("updateCampaignAssignmentCache", campaignId, contactIds);
       // We do NOT delete current cache as mostly people are re-assigned.
       // When people are zero-d out, then the assignments themselves are deleted
       // await r.redis.delAsync(assignmentKey);
       // Now refill it, streaming for efficiency
+      const assignmentKey = contactAssignmentKey(campaignId);
       let query = r
         .knex("campaign_contact")
-        .where("campaign_id", campaignId)
-        .select("id", "assignment_id");
+        .join("assignment", "assignment.id", "campaign_contact.assignment_id")
+        .where("campaign_contact.campaign_id", campaignId)
+        .select("campaign_contact.id", "assignment_id", "assignment.user_id");
       if (contactIds) {
-        query = query.whereIn("id", contactIds);
+        query = query.whereIn("campaign_contact.id", contactIds);
       }
-      const result = query.stream(stream => {
-        const cacheSaver = new Writable({ objectMode: true });
-        // eslint-disable-next-line no-underscore-dangle
-        cacheSaver._write = (dbRecord, enc, next) => {
-          // Note: non-async land
-          setCacheContactAssignment(dbRecord.id, campaignId, dbRecord).then(
-            () => {
-              next();
-            },
-            err => {
-              console.error("FAILED CAMPAIGN ASSIGNMENT CACHE SAVE", err);
-              stream.end();
-              next();
-            }
-          );
-        };
-        stream.pipe(cacheSaver);
-      });
-      return result
-        .then(done => {
-          console.log("updateCampaignAssignmentCache Completed", campaignId);
-        })
-        .catch(err => {
-          console.log("updateCampaignAssignmentCache Error", campaignId, err);
-        });
+      const promises = (await query).map(dbRecord =>
+        setCacheContactAssignment(dbRecord.id, campaignId, dbRecord)
+      );
+      const data = await Promise.all(promises);
+      console.log("updateCampaignAssignmentCache", data[0], data.length);
     }
   },
   updateStatus: async (contact, newStatus) => {
@@ -465,37 +452,34 @@ const campaignContactCache = {
         // Other contexts don't really need to update the cell key -- just the status
         const cellKey = cellTargetKey(contact.cell, contact.messageservice_sid);
         // console.log('contact updateStatus', cellKey, newStatus, contact)
-        await r.redis
+        let redisQuery = r.redis
           .multi()
-          .set(statusKey, newStatus)
           // We update the cell info on status updates, because this happens
           // during message sending -- this is exactly the moment we want to
           // 'steal' a cell from one (presumably older) campaign into another
+          // delay expiration for contacts we continue to update
           .set(
             cellKey,
-            [contact.id, contact.assignment_id, contact.timezone_offset].join(
-              ":"
-            )
+            [
+              contact.id,
+              "",
+              contact.timezone_offset || "",
+              contact.campaign_id || ""
+            ].join(":")
           )
           // delay expiration for contacts we continue to update
           .expire(contactKey, 43200)
           .expire(statusKey, 43200)
-          .expire(cellKey, 43200)
-          .execAsync();
+          .expire(cellKey, 43200);
+        if (newStatus) {
+          redisQuery = redisQuery.set(statusKey, newStatus);
+        }
+        await redisQuery.execAsync();
         //await updateAssignmentContact(contact, newStatus);
       }
-      clearMemoizedCache(contact.id);
     } catch (err) {
-      console.log(
-        "contact updateStatus Error",
-        cellKey,
-        newStatus,
-        contact,
-        err
-      );
+      console.log("contact updateStatus Error", newStatus, contact, err);
     }
-
-    // console.log('updateStatus, CONTACT', contact)
   }
 };
 

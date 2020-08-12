@@ -3,7 +3,6 @@ import {
   cacheableData,
   Assignment,
   Campaign,
-  CampaignContact,
   Organization,
   User,
   UserOrganization
@@ -23,6 +22,29 @@ import Papa from "papaparse";
 import moment from "moment";
 import { sendEmail } from "../server/mail";
 import { Notifications, sendUserNotification } from "../server/notifications";
+import { getConfig } from "../server/api/lib/config";
+
+const defensivelyDeleteOldJobsForCampaignJobType = async job => {
+  console.log("job", job);
+  let retries = 0;
+  const doDelete = async () => {
+    try {
+      await r
+        .knex("job_request")
+        .where({ campaign_id: job.campaign_id, job_type: job.job_type })
+        .whereNot({ id: job.id })
+        .delete();
+    } catch (err) {
+      if (retries < 5) {
+        retries += 1;
+        await doDelete();
+      } else
+        console.error(`Could not delete campaign/jobType. Err: ${err.message}`);
+    }
+  };
+
+  await doDelete();
+};
 
 const defensivelyDeleteJob = async job => {
   if (job.id) {
@@ -37,7 +59,7 @@ const defensivelyDeleteJob = async job => {
         if (retries < 5) {
           retries += 1;
           await deleteJob();
-        } else log.error(`Could not delete job. Err: ${err.message}`);
+        } else console.error(`Could not delete job. Err: ${err.message}`);
       }
     };
 
@@ -201,9 +223,7 @@ export async function dispatchContactIngestLoad(job, organization) {
       : process.env.MAX_CONTACTS || 0,
     10
   );
-  await ingestMethod.processContactLoad(job, maxContacts, {
-    /*FUTURE: context obj*/
-  });
+  await ingestMethod.processContactLoad(job, maxContacts, organization);
 }
 
 export async function failedContactLoad(
@@ -247,8 +267,8 @@ export async function completeContactLoad(
   const campaign = await Campaign.get(campaignId);
   const organization = await Organization.get(campaign.organization_id);
 
-  let deleteOptOutCells;
-  let deleteDuplicateCells;
+  let deleteOptOutCells = null;
+  let deleteDuplicateCells = null;
   const knexOptOutDeleteResult = await r
     .knex("campaign_contact")
     .whereIn("cell", getOptOutSubQuery(campaign.organization_id))
@@ -295,8 +315,8 @@ export async function completeContactLoad(
     .knex("campaign_admin")
     .where("campaign_id", campaignId)
     .update({
-      deleted_optouts_count: deleteOptOutCells || null,
-      duplicate_contacts_count: deleteDuplicateCells || null,
+      deleted_optouts_count: deleteOptOutCells,
+      duplicate_contacts_count: deleteDuplicateCells,
       contacts_count: finalContactCount,
       ingest_method: job.job_type.replace(/^ingest./, ""),
       ingest_success: true,
@@ -393,6 +413,7 @@ export async function assignTexters(job) {
 
   TODO: what happens when we switch modes? Do we allow it?
   */
+
   const payload = JSON.parse(job.payload);
   const cid = job.campaign_id;
   console.log("assignTexters1", cid, payload);
@@ -715,6 +736,11 @@ export async function exportCampaign(job) {
     convertedMessages = await Promise.all(convertedMessages);
     finalCampaignMessages = finalCampaignMessages.concat(convertedMessages);
     let convertedContacts = contacts.map(async contact => {
+      const tags = await r
+        .knex("tag_campaign_contact")
+        .where("campaign_contact_id", contact.id)
+        .leftJoin("tag", "tag.id", "tag_campaign_contact.tag_id");
+
       const contactRow = {
         campaignId: campaign.id,
         campaign: campaign.title,
@@ -735,7 +761,8 @@ export async function exportCampaign(job) {
           : "false",
         "contact[messageStatus]": contact.message_status,
         "contact[errorCode]": contact.error_code,
-        "contact[external_id]": contact.external_id
+        "contact[external_id]": contact.external_id,
+        "contact[tags]": tags.length > 0 ? tags.map(tag => tag.name) : null
       };
       const customFields = JSON.parse(contact.custom_fields);
       Object.keys(customFields).forEach(fieldName => {
@@ -827,13 +854,15 @@ export async function exportCampaign(job) {
 export async function importScript(job) {
   const payload = await unzipPayload(job);
   try {
+    await defensivelyDeleteOldJobsForCampaignJobType(job);
     await importScriptFromDocument(payload.campaignId, payload.url); // TODO try/catch
+    console.log(`Script import complete ${payload.campaignId} ${payload.url}`);
   } catch (exception) {
     await r
       .knex("job_request")
       .where("id", job.id)
       .update({ result_message: exception.message });
-    console.log(exception.message);
+    console.warn(exception.message);
     return;
   }
   defensivelyDeleteJob(job);
@@ -1052,28 +1081,6 @@ export async function loadMessages(csvFile) {
   });
 }
 
-export async function loadCampaignCache(
-  campaign,
-  organization,
-  { remainingMilliseconds }
-) {
-  // Asynchronously start running a refresh of all the campaign data into
-  // our cache.  This should refresh/clear any corruption
-  console.log("loadCampaignCache async tasks...", campaign.id);
-  const loadJob = cacheableData.campaignContact
-    .loadMany(campaign, organization, { remainingMilliseconds })
-    .then(() => {
-      console.log("FINISHED contact loadMany", campaign.id);
-    })
-    .catch(err => {
-      console.error("ERROR contact loadMany", campaign.id, err, campaign);
-    });
-  if (global.TEST_ENVIRONMENT) {
-    // otherwise this races with texting
-    await loadJob;
-  }
-}
-
 // Temporary fix for orgless users
 // See https://github.com/MoveOnOrg/Spoke/issues/934
 // and job-processes.js
@@ -1112,4 +1119,42 @@ export async function clearOldJobs(delay) {
     .where({ assigned: true })
     .where("updated_at", "<", delay)
     .delete();
+}
+
+export async function buyPhoneNumbers(job) {
+  try {
+    if (!job.organization_id) {
+      throw Error("organization_id is required");
+    }
+    const payload = JSON.parse(job.payload);
+    const { areaCode, limit, messagingServiceSid } = payload;
+    if (!areaCode || !limit) {
+      throw new Error("areaCode and limit are required");
+    }
+    const organization = await cacheableData.organization.load(
+      job.organization_id
+    );
+    const service = serviceMap[getConfig("DEFAULT_SERVICE", organization)];
+    const opts = {};
+    if (messagingServiceSid) {
+      opts.messagingServiceSid = messagingServiceSid;
+    }
+    const totalPurchased = await service.buyNumbersInAreaCode(
+      organization,
+      areaCode,
+      limit,
+      opts
+    );
+    log.info(`Bought ${totalPurchased} number(s)`, {
+      status: "COMPLETE",
+      areaCode,
+      limit,
+      totalPurchased,
+      organization_id: job.organization_id
+    });
+  } catch (err) {
+    log.error(`JOB ${job.id} FAILED: ${err.message}`, err);
+  } finally {
+    await defensivelyDeleteJob(job);
+  }
 }

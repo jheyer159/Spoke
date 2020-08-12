@@ -1,15 +1,27 @@
 import { accessRequired } from "./errors";
 import { mapFieldsToModel } from "./lib/utils";
+import { errorDescriptions } from "./lib/twilio";
 import { Campaign, JobRequest, r, cacheableData } from "../models";
-import { currentEditors } from "../models/cacheable_queries";
 import { getUsers } from "./user";
 import {
   getAvailableIngestMethods,
   getMethodChoiceData
 } from "../../integrations/contact-loaders";
+import twilio from "./lib/twilio";
+import { getConfig } from "./lib/config";
 
-export function addCampaignsFilterToQuery(queryParam, campaignsFilter) {
+const title = 'lower("campaign"."title")';
+
+export function addCampaignsFilterToQuery(
+  queryParam,
+  campaignsFilter,
+  organizationId
+) {
   let query = queryParam;
+
+  if (organizationId) {
+    query = query.where("campaign.organization_id", organizationId);
+  }
 
   if (campaignsFilter) {
     const resultSize = campaignsFilter.listSize ? campaignsFilter.listSize : 0;
@@ -30,6 +42,17 @@ export function addCampaignsFilterToQuery(queryParam, campaignsFilter) {
       query = query.whereIn("campaign.id", campaignsFilter.campaignIds);
     }
 
+    if ("searchString" in campaignsFilter && campaignsFilter.searchString) {
+      const searchStringWithPercents = (
+        "%" +
+        campaignsFilter.searchString +
+        "%"
+      ).toLocaleLowerCase();
+      query = query.andWhere(
+        r.knex.raw(`${title} like ?`, [searchStringWithPercents])
+      );
+    }
+
     if (resultSize && !pageSize) {
       query = query.limit(resultSize);
     }
@@ -43,62 +66,100 @@ export function addCampaignsFilterToQuery(queryParam, campaignsFilter) {
 export function buildCampaignQuery(
   queryParam,
   organizationId,
-  campaignsFilter,
-  addFromClause = true
+  campaignsFilter
 ) {
-  let query = queryParam;
+  let query = queryParam.from("campaign");
 
-  if (addFromClause) {
-    query = query.from("campaign");
-  }
-
-  query = query.where("campaign.organization_id", organizationId);
   query = query.leftJoin(
     "campaign_admin",
     "campaign_admin.campaign_id",
     "campaign.id"
   );
-  query = addCampaignsFilterToQuery(query, campaignsFilter);
+
+  query = addCampaignsFilterToQuery(query, campaignsFilter, organizationId);
 
   return query;
 }
 
-export async function getCampaigns(organizationId, cursor, campaignsFilter) {
+const id = '"campaign"."id"';
+const dueDate = '"campaign"."due_by"';
+
+const asc = column => `${column} ASC`;
+const desc = column => `${column} DESC`;
+
+const buildOrderByClause = (query, sortBy) => {
+  let fragmentArray = undefined;
+  switch (sortBy) {
+    case "DUE_DATE_ASC":
+      fragmentArray = [asc(dueDate), asc(id)];
+      break;
+    case "DUE_DATE_DESC":
+      fragmentArray = [desc(dueDate), asc(id)];
+      break;
+    case "TITLE":
+      fragmentArray = [title];
+      break;
+    case "TIMEZONE":
+      fragmentArray = ['"campaign"."timezone"'];
+      break;
+    case "ID_DESC":
+      fragmentArray = [desc(id)];
+      break;
+    case "ID_ASC":
+    default:
+      fragmentArray = [asc(id)];
+      break;
+  }
+  return query.orderByRaw(fragmentArray.join(", "));
+};
+
+const buildSelectClause = sortBy => {
+  const fragmentArray = [
+    "campaign.*",
+    "campaign_admin.contacts_count",
+    "campaign_admin.ingest_success"
+  ];
+
+  if (sortBy === "TITLE") {
+    fragmentArray.push(title);
+  }
+
+  return r.knex.select(r.knex.raw(fragmentArray.join(", ")));
+};
+
+export async function getCampaigns(
+  organizationId,
+  cursor,
+  campaignsFilter,
+  sortBy
+) {
   let campaignsQuery = buildCampaignQuery(
-    r.knex.select(
-      "campaign.*",
-      "campaign_admin.contacts_count",
-      "campaign_admin.ingest_success"
-    ),
+    buildSelectClause(sortBy),
     organizationId,
     campaignsFilter
   );
-  campaignsQuery = campaignsQuery.orderBy("due_by", "desc").orderBy("id");
+  campaignsQuery = buildOrderByClause(campaignsQuery, sortBy);
 
   if (cursor) {
     campaignsQuery = campaignsQuery.limit(cursor.limit).offset(cursor.offset);
     const campaigns = await campaignsQuery;
 
-    const campaignsCountQuery = buildCampaignQuery(
-      r.knex.count("*"),
-      organizationId,
-      campaignsFilter
+    const campaignsCount = await r.getCount(
+      buildCampaignQuery(r.knex, organizationId, campaignsFilter)
     );
-
-    const campaignsCountArray = await campaignsCountQuery;
 
     const pageInfo = {
       limit: cursor.limit,
       offset: cursor.offset,
-      total: campaignsCountArray[0].count
+      total: campaignsCount
     };
     return {
       campaigns,
       pageInfo
     };
-  } else {
-    return campaignsQuery;
   }
+
+  return campaignsQuery;
 }
 
 export const resolvers = {
@@ -155,6 +216,32 @@ export const resolvers = {
           .knex("campaign_contact")
           .where({ is_opted_out: true, campaign_id: campaign.id })
       );
+    },
+    errorCounts: async (campaign, _, { user, loaders }) => {
+      await accessRequired(
+        user,
+        campaign.organization_id,
+        "SUPERVOLUNTEER",
+        true
+      );
+      const errorCounts = await r
+        .knex("campaign_contact")
+        .where("campaign_id", campaign.id)
+        .whereNotNull("error_code")
+        .select("error_code", r.knex.raw("count(*) as error_count"))
+        .groupBy("error_code")
+        .orderByRaw("count(*) DESC");
+      const organization = loaders.organization.load(campaign.organization_id);
+      const isTwilio = getConfig("DEFAULT_SERVICE", organization) === "twilio";
+      return errorCounts.map(e => ({
+        code: String(e.error_code),
+        count: e.error_count,
+        description: errorDescriptions[e.error_code] || null,
+        link:
+          e.error_code > 0 && isTwilio
+            ? `https://www.twilio.com/docs/api/errors/${e.error_code}`
+            : null
+      }));
     }
   },
   CampaignsReturn: {
@@ -189,12 +276,15 @@ export const resolvers = {
         "id",
         "title",
         "description",
+        "batchSize",
         "isStarted",
         "isArchived",
         "useDynamicAssignment",
         "introHtml",
         "primaryColor",
         "logoImageUrl",
+        "useOwnMessagingService",
+        "messageserviceSid",
         "overrideOrganizationTextingHours",
         "textingHoursEnforced",
         "textingHoursStart",
@@ -207,6 +297,15 @@ export const resolvers = {
       campaign.due_by instanceof Date || !campaign.due_by
         ? campaign.due_by || null
         : new Date(campaign.due_by),
+    joinToken: async (campaign, _, { user }) => {
+      await accessRequired(
+        user,
+        campaign.organization_id,
+        "SUPERVOLUNTEER",
+        true
+      );
+      return campaign.join_token;
+    },
     organization: async (campaign, _, { loaders }) =>
       campaign.organization ||
       loaders.organization.load(campaign.organization_id),
@@ -218,8 +317,8 @@ export const resolvers = {
         true
       );
       return r
-        .table("job_request")
-        .filter({ campaign_id: campaign.id })
+        .knex("job_request")
+        .where({ campaign_id: campaign.id })
         .orderBy("updated_at", "desc");
     },
     ingestMethodsAvailable: async (campaign, _, { user, loaders }) => {
@@ -282,6 +381,20 @@ export const resolvers = {
         updatedAt: status.updated_at ? new Date(status.updated_at) : null
       };
     },
+    completionStats: async campaign => {
+      // must be cache-loaded or bust:
+      const stats = await cacheableData.campaign.completionStats(campaign.id);
+      return {
+        // 0 should still diffrentiate from null
+        assignedCount: stats.assignedCount > -1 ? stats.assignedCount : null,
+        contactsCount: campaign.contactsCount || stats.contactsCount || null,
+        errorCount: stats.errorCount || null,
+        // messagedCount won't be defined until some messages are sent
+        messagedCount: stats.assignedCount ? stats.messagedCount || 0 : null,
+        needsResponseCount:
+          stats.needsResponseCount > -1 ? stats.needsResponseCount : null
+      };
+    },
     texters: async (campaign, _, { user }) => {
       await accessRequired(
         user,
@@ -289,9 +402,12 @@ export const resolvers = {
         "SUPERVOLUNTEER",
         true
       );
-      return getUsers(campaign.organization_id, null, {
-        campaignId: campaign.id
-      });
+      return getUsers(
+        campaign.organization_id,
+        null,
+        { campaignId: campaign.id },
+        "ANY"
+      );
     },
     assignments: async (campaign, { assignmentsFilter }, { user }) => {
       await accessRequired(
@@ -301,15 +417,40 @@ export const resolvers = {
         true
       );
       let query = r
-        .table("assignment")
-        .getAll(campaign.id, { index: "campaign_id" });
+        .knex("assignment")
+        .where("assignment.campaign_id", campaign.id);
 
-      if (
-        assignmentsFilter &&
-        assignmentsFilter.hasOwnProperty("texterId") &&
-        assignmentsFilter.textId !== null
-      ) {
-        query = query.filter({ user_id: assignmentsFilter.texterId });
+      if (assignmentsFilter) {
+        if (assignmentsFilter.texterId) {
+          query = query.where("user_id", assignmentsFilter.texterId);
+        }
+        if (assignmentsFilter.stats) {
+          const fields = [
+            "assignment.id",
+            "assignment.user_id",
+            "assignment.campaign_id",
+            "user.first_name",
+            "user.last_name",
+            "user_organization.role"
+          ];
+          query = query
+            .join("user", "user.id", "assignment.user_id")
+            .join("user_organization", "user_organization.user_id", "user.id")
+            .join(
+              "campaign_contact",
+              "campaign_contact.assignment_id",
+              "assignment.id"
+            )
+            .select(
+              ...fields,
+              r.knex.raw(
+                "SUM(CASE WHEN campaign_contact.message_status = 'needsMessage' THEN 1 ELSE 0 END) as needs_message_count"
+              ),
+              r.knex.raw("COUNT(*) as contacts_count")
+            )
+            .groupBy(...fields)
+            .havingRaw("count(*) > 0");
+        }
       }
 
       return query;
@@ -327,6 +468,25 @@ export const resolvers = {
         userId: userId || "",
         campaignId: campaign.id
       });
+    },
+    texterUIConfig: async (campaign, _, { user, loaders }) => {
+      await accessRequired(user, campaign.organization_id, "TEXTER", true);
+      const organization = await loaders.organization.load(
+        campaign.organization_id
+      );
+
+      let options =
+        getConfig("TEXTER_UI_SETTINGS", campaign, { onlyLocal: true }) || "";
+      if (!options) {
+        // fallback on organization defaults
+        options = getConfig("TEXTER_UI_SETTINGS", organization) || "";
+      }
+      const sideboxes = getConfig("TEXTER_SIDEBOXES", organization);
+      const sideboxChoices = (sideboxes && sideboxes.split(",")) || [];
+      return {
+        options,
+        sideboxChoices
+      };
     },
     contacts: async (campaign, _, { user }) => {
       await accessRequired(user, campaign.organization_id, "ADMIN", true);
@@ -366,6 +526,10 @@ export const resolvers = {
         "SUPERVOLUNTEER",
         true
       );
+      const stats = await cacheableData.campaign.completionStats(campaign.id);
+      if (stats.assignedCount && campaign.contactsCount) {
+        return Number(campaign.contactsCount) - Number(stats.assignedCount) > 0;
+      }
       const contacts = await r
         .knex("campaign_contact")
         .select("id")
@@ -380,6 +544,10 @@ export const resolvers = {
         "SUPERVOLUNTEER",
         true
       );
+      const stats = await cacheableData.campaign.completionStats(campaign.id);
+      if (stats.messagedCount && campaign.contactsCount) {
+        return Number(campaign.contactsCount) - Number(stats.messagedCount) > 0;
+      }
       const contacts = await r
         .knex("campaign_contact")
         .select("id")
@@ -407,6 +575,13 @@ export const resolvers = {
         return cacheableData.campaign.currentEditors(campaign, user);
       }
       return "";
+    },
+    phoneNumbers: async campaign => {
+      const phoneNumbers = await twilio.getPhoneNumbersForService(
+        campaign.organization,
+        campaign.messageservice_sid
+      );
+      return phoneNumbers.map(phoneNumber => phoneNumber.phoneNumber);
     },
     creator: async (campaign, _, { loaders }) =>
       campaign.creator_id ? loaders.user.load(campaign.creator_id) : null

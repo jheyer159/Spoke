@@ -27,7 +27,8 @@ export async function available(organization, user) {
   /// then it's better to allow the result to be cached
   const orgFeatures = JSON.parse(organization.features || "{}");
   const result =
-    (orgFeatures.service || getConfig("DEFAULT_SERVICE")) === "fakeservice";
+    (orgFeatures.service || getConfig("DEFAULT_SERVICE", organization)) ===
+    "fakeservice";
   return {
     result,
     expiresSeconds: 0
@@ -47,23 +48,18 @@ export function clientChoiceDataCacheKey(organization, campaign, user) {
   return `${organization.id}-${campaign.id}`;
 }
 
-export async function getClientChoiceData(
-  organization,
-  campaign,
-  user,
-  loaders
-) {
+export async function getClientChoiceData(organization, campaign, user) {
   /// data to be sent to the admin client to present options to the component or similar
   /// The react-component will be sent this data as a property
   /// return a json object which will be cached for expiresSeconds long
   /// `data` should be a single string -- it can be JSON which you can parse in the client component
   return {
-    data: `choice data from server ${Math.random()}`,
+    data: `choice data from server`,
     expiresSeconds: 0
   };
 }
 
-export async function processContactLoad(job, maxContacts) {
+export async function processContactLoad(job, maxContacts, organization) {
   /// Trigger processing -- this will likely be the most important part
   /// you should load contacts into the contact table with the job.campaign_id
   /// Since this might just *begin* the processing and other work might
@@ -74,6 +70,11 @@ export async function processContactLoad(job, maxContacts) {
   ///      * delete contacts that are in the opt_out table,
   ///      * delete duplicate cells,
   ///      * clear/update caching, etc.
+  /// The organization parameter is an object containing the name and other
+  ///   details about the organization on whose behalf this contact load
+  ///   was initiated. It is included here so it can be passed as the
+  ///   second parameter of getConfig in order to retrieve organization-
+  ///   specific configuration values.
   /// Basic responsibilities:
   /// 1. Delete previous campaign contacts on a previous choice/upload
   /// 2. Set campaign_contact.campaign_id = job.campaign_id on all uploaded contacts
@@ -133,8 +134,7 @@ export async function processContactLoad(job, maxContacts) {
       campaign_id: campaignId
     });
   }
-
-  await r.knex("campaign_contact").insert(newContacts);
+  await r.knex.batchInsert("campaign_contact", newContacts, 100);
 
   await completeContactLoad(
     job,

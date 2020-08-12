@@ -4,6 +4,9 @@ const coreBackgroundColor = global.CORE_BACKGROUND_COLOR || "rgb(83, 180, 119)";
 
 const colors = {
   coreBackgroundColor: coreBackgroundColor,
+  coreBackgroundColorDisabled: tinycolor(coreBackgroundColor)
+    .darken(10)
+    .toHexString(),
   coreHoverColor: tinycolor(coreBackgroundColor)
     .darken(5)
     .toHexString(),
@@ -20,6 +23,7 @@ const colors = {
   darkGreen: "rgb(24, 154, 52)",
   darkGray: "rgb(54, 67, 80)",
   gray: "rgb(153, 155, 158)",
+  gray50: "rgb(250, 250, 250)",
   veryLightGray: "rgb(240, 242, 240)",
   lightGray: "rgb(225, 228, 224)",
   white: "rgb(255,255,255)",
@@ -121,7 +125,11 @@ const components = {
     margin: "50 auto",
     overflow: "hidden"
   },
-  logoImg: {}
+  logoImg: {},
+  popup: {
+    backgroundColor: colors.gray50,
+    outline: colors.darkGray
+  }
 };
 
 const theme = {

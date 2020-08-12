@@ -8,8 +8,8 @@ import gql from "graphql-tag";
 import { withRouter } from "react-router";
 
 class TexterTodoList extends React.Component {
-  constructor() {
-    super();
+  constructor(props) {
+    super(props);
     this.state = { polling: null };
   }
 
@@ -78,8 +78,19 @@ class TexterTodoList extends React.Component {
     }
   }
 
+  profileComplete() {
+    const { data, router } = this.props;
+    if (!data.currentUser.profileComplete) {
+      const orgId = this.props.params.organizationId;;
+      const userId = data.currentUser.id;
+      const next = this.props.location.pathname;
+      router.push(`/app/${orgId}/account/${userId}?next=${next}&fieldsNeeded=1`);
+    }
+  }
+
   render() {
     this.termsAgreed();
+    this.profileComplete();
     const todos = this.props.data.currentUser.todos;
     const renderedTodos = this.renderTodoList(todos);
 
@@ -108,6 +119,7 @@ export const dataQuery = gql`
     currentUser {
       id
       terms
+      profileComplete(organizationId: $organizationId)
       cacheable
       todos(organizationId: $organizationId) {
         id
@@ -115,6 +127,7 @@ export const dataQuery = gql`
           id
           title
           description
+          batchSize
           useDynamicAssignment
           hasUnassignedContactsForTexter
           introHtml
@@ -137,42 +150,44 @@ export const dataQuery = gql`
   }
 `;
 
-const mapQueriesToProps = ({ ownProps }) => ({
+const queries = {
   data: {
     query: dataQuery,
-    variables: {
-      organizationId: ownProps.params.organizationId,
-      needsMessageFilter: {
-        messageStatus: "needsMessage",
-        isOptedOut: false,
-        validTimezone: true
-      },
-      needsResponseFilter: {
-        messageStatus: "needsResponse",
-        isOptedOut: false,
-        validTimezone: true
-      },
-      badTimezoneFilter: {
-        isOptedOut: false,
-        validTimezone: false
-      },
-      completedConvosFilter: {
-        isOptedOut: false,
-        validTimezone: true,
-        messageStatus: "messaged"
-      },
-      pastMessagesFilter: {
-        messageStatus: "convo",
-        isOptedOut: false,
-        validTimezone: true
-      },
-      skippedMessagesFilter: {
-        messageStatus: "closed",
-        isOptedOut: false,
-        validTimezone: true
+    options: ownProps => ({
+      variables: {
+        organizationId: ownProps.params.organizationId,
+        needsMessageFilter: {
+          messageStatus: "needsMessage",
+          isOptedOut: false,
+          validTimezone: true
+        },
+        needsResponseFilter: {
+          messageStatus: "needsResponse",
+          isOptedOut: false,
+          validTimezone: true
+        },
+        badTimezoneFilter: {
+          isOptedOut: false,
+          validTimezone: false
+        },
+        completedConvosFilter: {
+          isOptedOut: false,
+          validTimezone: true,
+          messageStatus: "messaged"
+        },
+        pastMessagesFilter: {
+          messageStatus: "convo",
+          isOptedOut: false,
+          validTimezone: true
+        },
+        skippedMessagesFilter: {
+          messageStatus: "closed",
+          isOptedOut: false,
+          validTimezone: true
+        }
       }
-    }
+    })
   }
-});
+};
 
-export default loadData(withRouter(TexterTodoList), { mapQueriesToProps });
+export default loadData({ queries })(withRouter(TexterTodoList));
